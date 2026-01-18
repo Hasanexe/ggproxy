@@ -5,71 +5,14 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/url"
-	"strings"
 	"sync"
 	"time"
 )
 
-// trimCRLF efficiently removes trailing \r\n without allocation using string slicing
-func trimCRLF(s string) string {
-	if len(s) > 0 && s[len(s)-1] == '\n' {
-		s = s[:len(s)-1]
-	}
-	if len(s) > 0 && s[len(s)-1] == '\r' {
-		s = s[:len(s)-1]
-	}
-	return s
-}
-
-// parseRequestLine parses HTTP request line into method, URI, and version
-// Returns error if the line is malformed
-func parseRequestLine(line string) (method, uri, version string, err error) {
-	line = trimCRLF(line)
-	parts := strings.SplitN(strings.TrimSpace(line), " ", 3)
-	if len(parts) < 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
-		return "", "", "", fmt.Errorf("malformed request line")
-	}
-	return parts[0], parts[1], parts[2], nil
-}
-
-// readHeaders reads all HTTP headers until blank line
-// Returns map with lowercase keys for case-insensitive lookup
-func readHeaders(reader *bufio.Reader) (map[string]string, error) {
-	headers := make(map[string]string, 8) // pre-allocate for typical case (8 headers)
-
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			return headers, err
-		}
-
-		line = trimCRLF(line)
-
-		// Check for end of headers (blank line)
-		if line == "" {
-			break
-		}
-
-		// Parse "Key: Value" format using IndexByte for efficiency
-		colonIndex := strings.IndexByte(line, ':')
-		if colonIndex == -1 {
-			// Skip malformed headers
-			continue
-		}
-
-		key := strings.ToLower(strings.TrimSpace(line[:colonIndex]))
-		value := strings.TrimSpace(line[colonIndex+1:])
-
-		headers[key] = value
-	}
-
-	return headers, nil
-}
-
-// handleHTTP handles HTTP proxy requests without debug logging
-func handleHTTP(client net.Conn) {
+// handleHTTPDebug handles HTTP proxy requests with debug logging
+func handleHTTPDebug(client net.Conn) {
 	defer client.Close()
+	logChan <- fmt.Sprintf("%s: New connection", "HTTP")
 
 	// Set idle timeout
 	client.SetDeadline(time.Now().Add(cfg.IdleTimeout))
@@ -80,6 +23,7 @@ func handleHTTP(client net.Conn) {
 	// Read request line
 	line, err := reader.ReadString('\n')
 	if err != nil {
+		logChan <- fmt.Sprintf("HTTP: request line read error from %s: %v", client.RemoteAddr(), err)
 		return
 	}
 
@@ -87,13 +31,16 @@ func handleHTTP(client net.Conn) {
 	method, requestURI, version, err := parseRequestLine(line)
 	if err != nil {
 		io.WriteString(client, "HTTP/1.1 400 Bad Request\r\n\r\n")
+		logChan <- fmt.Sprintf("HTTP: malformed request from %s => 400", client.RemoteAddr())
 		return
 	}
+	logChan <- fmt.Sprintf("HTTP: request line from %s: %q", client.RemoteAddr(), line)
 
 	// Read all headers
 	headers, err := readHeaders(reader)
 	if err != nil {
 		io.WriteString(client, "HTTP/1.1 400 Bad Request\r\n\r\n")
+		logChan <- fmt.Sprintf("HTTP: header read error from %s: %v", client.RemoteAddr(), err)
 		return
 	}
 
@@ -102,27 +49,31 @@ func handleHTTP(client net.Conn) {
 		authHeader := headers["proxy-authorization"]
 		if !validateAuth(authHeader) {
 			io.WriteString(client, "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"GGProxy\"\r\n\r\n")
-			if !cfg.isLogOff {
-				logChan <- fmt.Sprintf("HTTP: authentication failed from %s", client.RemoteAddr())
-			}
+			logChan <- fmt.Sprintf("HTTP: auth failed for %s => 407", client.RemoteAddr())
 			return
 		}
 	}
 
 	// Route based on method (case-insensitive)
 	if method == "CONNECT" || method == "connect" {
-		handleHTTPConnect(client, reader, requestURI, version)
+		logChan <- fmt.Sprintf("HTTP: CONNECT request => tunnel for %s", client.RemoteAddr())
+		handleHTTPConnectDebug(client, reader, requestURI, version)
 		return
 	}
+
+	// Normal forward-proxy for HTTP method=GET/POST/PUT/DELETE...
+	logChan <- fmt.Sprintf("HTTP: forward proxy for method=%s from %s, URI=%s", method, client.RemoteAddr(), requestURI)
 
 	hostPort, newFirstLine, e := parseHostPortFromAbsoluteURI(method, requestURI, version)
 	if e != nil {
 		io.WriteString(client, "HTTP/1.1 400 Bad Request\r\n\r\n")
+		logChan <- fmt.Sprintf("HTTP: parseHostPort error for %s: %v", client.RemoteAddr(), e)
 		return
 	}
 
 	remote, err := net.Dial("tcp", hostPort)
 	if err != nil {
+		logChan <- fmt.Sprintf("HTTP: dial fail %s => %v", hostPort, err)
 		io.WriteString(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
 		return
 	}
@@ -169,25 +120,24 @@ func handleHTTP(client net.Conn) {
 	}()
 
 	wg.Wait()
-
-	if !cfg.isLogOff {
-		logChan <- fmt.Sprintf("HTTP: forward done for %s", client.RemoteAddr())
-	}
+	logChan <- fmt.Sprintf("HTTP: forward done for %s", client.RemoteAddr())
 }
 
-// handleHTTPConnect handles HTTP CONNECT tunneling without debug logging
-func handleHTTPConnect(client net.Conn, reader *bufio.Reader, hostPort, httpVersion string) {
+
+// handleHTTPConnectDebug handles HTTP CONNECT tunneling with debug logging
+func handleHTTPConnectDebug(client net.Conn, reader *bufio.Reader, hostPort, httpVersion string) {
+	logChan <- fmt.Sprintf("HTTP: Attempting to tunnel to %s for %s", hostPort, client.RemoteAddr())
+
 	remote, err := net.Dial("tcp", hostPort)
 	if err != nil {
+		logChan <- fmt.Sprintf("HTTP: Failed to connect to %s for %s: %v", hostPort, client.RemoteAddr(), err)
 		io.WriteString(client, httpVersion+" 502 Bad Gateway\r\n\r\n")
 		return
 	}
 	// Send 200 response
 	io.WriteString(client, httpVersion+" 200 Connection Established\r\n\r\n")
 
-	if !cfg.isLogOff {
-		logChan <- fmt.Sprintf("HTTP: tunnel established %s <-> %s", client.RemoteAddr(), hostPort)
-	}
+	logChan <- fmt.Sprintf("HTTP: tunnel established %s <-> %s", client.RemoteAddr(), hostPort)
 
 	defer remote.Close()
 	remote.SetDeadline(time.Now().Add(cfg.IdleTimeout))
@@ -215,29 +165,5 @@ func handleHTTPConnect(client net.Conn, reader *bufio.Reader, hostPort, httpVers
 	}()
 
 	wg.Wait()
-}
-
-// parseHostPortFromAbsoluteURI parses host and port from absolute URI
-func parseHostPortFromAbsoluteURI(method, requestURI, httpVersion string) (hostPort, newFirstLine string, err error) {
-	u, e := url.Parse(requestURI)
-	if e != nil {
-		return "", "", fmt.Errorf("url parse error: %v", e)
-	}
-	host := u.Hostname()
-	port := u.Port()
-	scheme := strings.ToLower(u.Scheme)
-	if port == "" {
-		if scheme == "https" {
-			port = "443"
-		} else {
-			port = "80"
-		}
-	}
-	hostPort = net.JoinHostPort(host, port)
-
-	// If you want minimal rewriting so the server sees "GET /path HTTP/1.1" instead of absolute
-	// If you want total pass-thru, set newFirstLine = "" so caller uses the original line
-	newFirstLine = fmt.Sprintf("%s %s %s", method, u.RequestURI(), httpVersion)
-
-	return hostPort, newFirstLine, nil
+	logChan <- fmt.Sprintf("HTTP: tunnel closed %s <-> %s", client.RemoteAddr(), hostPort)
 }

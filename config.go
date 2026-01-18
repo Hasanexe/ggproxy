@@ -10,15 +10,16 @@ import (
 
 // Config holds all configuration options
 type Config struct {
-	Port              int
-	isSocks           bool
-	isDebug           bool
-	isLogOff          bool
-	LogFile           string
-	AllowedIPs        []string
-	IdleTimeout       time.Duration
-	BufferSize        int
-	LogChanBufferSize int
+	Port         int
+	isSocks      bool
+	isDebug      bool
+	isLogOff     bool
+	AllowedIPs   []string
+	IdleTimeout  time.Duration
+	BufferSize   int
+	AuthUsername string
+	AuthPassword string
+	AuthRequired bool // Computed flag to avoid repeated string comparisons
 }
 
 // loadConfig loads configuration from the specified file path
@@ -31,15 +32,15 @@ func loadConfig(path string) (*Config, error) {
 
 	// Default config with mode=http, port=3128
 	cfg := &Config{
-		isSocks:           false,                     //proxy_mode   = http
-		isDebug:           false,                     //log_level    = debug
-		isLogOff:          false,                     //log_level    = off || none
-		Port:              3128,                      //port             = 3128
-		AllowedIPs:        []string{},                //allowed_ip   = 0.0.0.0/0 (cidr)
-		LogFile:           "/var/log/mikroproxy.log", //log_file
-		IdleTimeout:       30 * time.Second,          //idle_timeout
-		BufferSize:        32 * 1024,                 //buffer_size
-		LogChanBufferSize: 1000,                      //log_buffer_size
+		isSocks:      false,            //proxy_mode   = http
+		isDebug:      false,            //log_level    = debug
+		isLogOff:     false,            //log_level    = off || none
+		Port:         3128,             //port             = 3128
+		AllowedIPs:   []string{},       //allowed_ip   = 0.0.0.0/0 (cidr)
+		IdleTimeout:  30 * time.Second, //idle_timeout
+		BufferSize:   32 * 1024,        //buffer_size
+		AuthUsername: "",               //auth_username
+		AuthPassword: "",               //auth_password
 	}
 
 	var content strings.Builder
@@ -80,7 +81,7 @@ func loadConfig(path string) (*Config, error) {
 				cfg.Port = p
 			}
 		case "log_file":
-			cfg.LogFile = val
+			// deprecated (stdout-only logging); intentionally ignored
 		case "log_level":
 			logLevel := strings.ToLower(val)
 			cfg.isDebug = logLevel == "debug"
@@ -105,16 +106,17 @@ func loadConfig(path string) (*Config, error) {
 				return nil, fmt.Errorf("buffer_size must be > 0")
 			}
 			cfg.BufferSize = size
+		case "auth_user":
+			cfg.AuthUsername = val
+		case "auth_pass":
+			cfg.AuthPassword = val
 		case "log_buffer_size":
-			var size int
-			if _, err := fmt.Sscanf(val, "%d", &size); err != nil {
-				return nil, fmt.Errorf("invalid log_buffer_size: %v", err)
-			}
-			if size <= 0 {
-				return nil, fmt.Errorf("log_buffer_size must be > 0")
-			}
-			cfg.LogChanBufferSize = size
+			// deprecated (stdout-only logging); intentionally ignored
 		}
 	}
+
+	// Compute AuthRequired flag once at startup to avoid repeated string comparisons
+	cfg.AuthRequired = (cfg.AuthUsername != "" && cfg.AuthPassword != "")
+
 	return cfg, nil
 }

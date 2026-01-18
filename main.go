@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -21,12 +20,14 @@ var (
 	logChan chan string
 )
 
+const logChanBufferSize = 1024
+
 // -----------------------------------------------------
 // Main
 // -----------------------------------------------------
 
 func main() {
-	configPath := flag.String("config", "/etc/mikroproxy.conf", "Path to mikroproxy config file")
+	configPath := flag.String("config", "/etc/ggproxy.conf", "Path to ggproxy config file")
 	flag.Parse()
 
 	// Load config
@@ -37,18 +38,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Setup async logging
-	lf, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0640)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening log file: %v\n", err)
-		os.Exit(1)
-	}
-	defer lf.Close()
-	logChan = make(chan string, cfg.LogChanBufferSize)
+	// Setup async logging (stdout only; journald can capture stdout via systemd)
+	logChan = make(chan string, logChanBufferSize)
 	go func() {
 		for msg := range logChan {
 			timestamp := time.Now().Format("02.01.2006 15:04:05")
-			lf.Write([]byte(timestamp + " " + msg + "\n"))
+			fmt.Fprintln(os.Stdout, timestamp+" "+msg)
 		}
 	}()
 
@@ -74,14 +69,6 @@ func main() {
 	// ListenConfig with global keep-alive
 	lc := &net.ListenConfig{
 		KeepAlive: 15 * time.Second,
-		Control: func(network, address string, c syscall.RawConn) error {
-			return c.Control(func(fd uintptr) {
-				// Linux-specific optimizations
-				syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
-				syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_KEEPINTVL, 10)
-				syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_KEEPCNT, 4)
-			})
-		},
 	}
 
 	addr := fmt.Sprintf("0.0.0.0:%d", cfg.Port)
