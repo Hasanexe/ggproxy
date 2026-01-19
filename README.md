@@ -64,7 +64,7 @@ sudo systemctl stop ggproxy
 Run the executable directly with an optional config file:
 
 ```cmd
-gg.exe --config=ggproxy.conf
+ggproxy.exe --config=ggproxy.conf
 ```
 
 ## Testing
