@@ -1,0 +1,6 @@
+Package: ggproxy
+Version: 1.2
+Section: net
+Architecture: amd64
+Maintainer: Hasan BAGCI hasannbagci@gmail.com
+Description: GGProxy, A lightweight high performance HTTP/HTTPS and SOCKS5 proxy

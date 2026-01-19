@@ -1,0 +1,27 @@
+#!/bin/bash
+set -e
+
+# Only create 'ggproxy' user if it doesn't already exist
+if ! id -u ggproxy >/dev/null 2>&1; then
+    useradd -r -s /bin/false ggproxy
+fi
+
+# Ensure a logfile exists (if you want a specific file path)
+if [ ! -f /var/log/ggproxy.log ]; then
+    touch /var/log/ggproxy.log
+fi
+
+# Set ownership and permissions
+chown ggproxy:ggproxy /etc/ggproxy.conf /var/log/ggproxy.log
+chmod 640 /etc/ggproxy.conf
+chmod 640 /var/log/ggproxy.log
+
+# Reload and enable systemd service
+systemctl daemon-reload
+systemctl enable ggproxy
+
+# Start service automatically on install
+systemctl start ggproxy || true
+
+exit 0
+

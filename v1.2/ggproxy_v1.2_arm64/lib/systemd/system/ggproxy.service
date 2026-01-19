@@ -1,0 +1,13 @@
+[Unit]
+Description=GGProxy v1.2 - Lightweight high performance HTTP/HTTPS and SOCKS5 proxy Service
+After=network.target
+
+[Service]
+User=ggproxy
+Group=ggproxy
+ExecStart=/usr/local/bin/ggproxy
+Restart=on-failure
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target
