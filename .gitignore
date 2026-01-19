@@ -20,3 +20,6 @@ mikroproxy
 # OS files
 .DS_Store
 Thumbs.db
+
+# Next Improvements
+improvements-*
