@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
@@ -19,7 +20,8 @@ type Config struct {
 	BufferSize   int
 	AuthUsername string
 	AuthPassword string
-	AuthRequired bool // Computed flag to avoid repeated string comparisons
+	AuthRequired bool   // Computed flag to avoid repeated string comparisons
+	AuthBasicToken []byte // Pre-computed Basic Auth token (bytes)
 }
 
 // loadConfig loads configuration from the specified file path
@@ -117,6 +119,16 @@ func loadConfig(path string) (*Config, error) {
 
 	// Compute AuthRequired flag once at startup to avoid repeated string comparisons
 	cfg.AuthRequired = (cfg.AuthUsername != "" && cfg.AuthPassword != "")
+
+	// Pre-compute AuthBasicToken
+	if cfg.AuthRequired {
+		auth := cfg.AuthUsername + ":" + cfg.AuthPassword
+		// "Basic " + base64(user:pass)
+		// We store the full header value "Basic <token>" as bytes for direct comparison
+		// Wait, the plan says: "Pre-compute the Auth Token: ... generate the exact expected HTTP header value: Basic <base64(user:pass)>."
+		encoded := base64.StdEncoding.EncodeToString([]byte(auth))
+		cfg.AuthBasicToken = []byte("Basic " + encoded)
+	}
 
 	return cfg, nil
 }

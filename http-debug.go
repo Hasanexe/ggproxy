@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -37,7 +38,7 @@ func handleHTTPDebug(client net.Conn) {
 	logChan <- fmt.Sprintf("HTTP: request line from %s: %q", client.RemoteAddr(), line)
 
 	// Read all headers
-	headers, err := readHeaders(reader)
+	headers, authHeader, hostHeader, err := readHeaders(reader)
 	if err != nil {
 		io.WriteString(client, "HTTP/1.1 400 Bad Request\r\n\r\n")
 		logChan <- fmt.Sprintf("HTTP: header read error from %s: %v", client.RemoteAddr(), err)
@@ -46,7 +47,6 @@ func handleHTTPDebug(client net.Conn) {
 
 	// Validate authentication if required using pre-computed flag
 	if cfg.AuthRequired {
-		authHeader := headers["proxy-authorization"]
 		if !validateAuth(authHeader) {
 			io.WriteString(client, "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"GGProxy\"\r\n\r\n")
 			logChan <- fmt.Sprintf("HTTP: auth failed for %s => 407", client.RemoteAddr())
@@ -65,10 +65,22 @@ func handleHTTPDebug(client net.Conn) {
 	logChan <- fmt.Sprintf("HTTP: forward proxy for method=%s from %s, URI=%s", method, client.RemoteAddr(), requestURI)
 
 	hostPort, newFirstLine, e := parseHostPortFromAbsoluteURI(method, requestURI, version)
-	if e != nil {
-		io.WriteString(client, "HTTP/1.1 400 Bad Request\r\n\r\n")
-		logChan <- fmt.Sprintf("HTTP: parseHostPort error for %s: %v", client.RemoteAddr(), e)
-		return
+	// If absolute URI parsing fails or returns empty host (e.g. origin-form), try using the Host header
+	if e != nil || hostPort == "" || strings.HasPrefix(hostPort, ":") {
+		if hostHeader != "" {
+			// If we have a Host header, use it. Default port 80 if not specified.
+			if !strings.Contains(hostHeader, ":") {
+				hostPort = hostHeader + ":80"
+			} else {
+				hostPort = hostHeader
+			}
+			// For origin-form, we don't rewrite the first line usually, or we keep it as is.
+			newFirstLine = "" 
+		} else {
+			io.WriteString(client, "HTTP/1.1 400 Bad Request\r\n\r\n")
+			logChan <- fmt.Sprintf("HTTP: parseHostPort error for %s: %v", client.RemoteAddr(), e)
+			return
+		}
 	}
 
 	remote, err := net.Dial("tcp", hostPort)
@@ -88,11 +100,9 @@ func handleHTTPDebug(client net.Conn) {
 		remote.Write([]byte(line))
 	}
 
-	// Forward headers to remote (excluding Proxy-Authorization)
-	for key, value := range headers {
-		if key != "proxy-authorization" {
-			remote.Write([]byte(key + ": " + value + "\r\n"))
-		}
+	// Forward headers to remote
+	for _, h := range headers {
+		remote.Write([]byte(h + "\r\n"))
 	}
 
 	// Send blank line to complete HTTP request

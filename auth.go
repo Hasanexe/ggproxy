@@ -2,50 +2,22 @@ package main
 
 import (
 	"crypto/subtle"
-	"encoding/base64"
 	"io"
 	"net"
-	"strings"
 )
 
 // validateAuth validates HTTP Basic Authentication header value
-// Returns true if credentials match configuration, false otherwise
 func validateAuth(authHeader string) bool {
-	// Use pre-computed flag for faster check
 	if !cfg.AuthRequired {
 		return true
 	}
 
-	// Check if header exists
-	if authHeader == "" {
-		return false
+	// Direct byte comparison with pre-computed token
+	if subtle.ConstantTimeCompare([]byte(authHeader), cfg.AuthBasicToken) == 1 {
+		return true
 	}
 
-	// Check "Basic " prefix
-	if !strings.HasPrefix(authHeader, "Basic ") {
-		return false
-	}
-
-	// Decode base64 (skip "Basic " prefix)
-	encoded := authHeader[6:]
-	decoded, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return false
-	}
-
-	// Split username:password
-	creds := string(decoded)
-	colonIndex := strings.IndexByte(creds, ':')
-	if colonIndex == -1 {
-		return false
-	}
-
-	username := creds[:colonIndex]
-	password := creds[colonIndex+1:]
-
-	// Constant-time comparison (security)
-	return subtle.ConstantTimeCompare([]byte(username), []byte(cfg.AuthUsername)) == 1 &&
-		subtle.ConstantTimeCompare([]byte(password), []byte(cfg.AuthPassword)) == 1
+	return false
 }
 
 // authenticateSocks performs SOCKS5 username/password authentication (RFC 1929)

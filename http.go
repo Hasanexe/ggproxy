@@ -23,83 +23,94 @@ func trimCRLF(s string) string {
 }
 
 // parseRequestLine parses HTTP request line into method, URI, and version
-// Returns error if the line is malformed
 func parseRequestLine(line string) (method, uri, version string, err error) {
 	line = trimCRLF(line)
-	parts := strings.SplitN(strings.TrimSpace(line), " ", 3)
-	if len(parts) < 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+	// Use IndexByte to avoid allocating a slice
+	idx1 := strings.IndexByte(line, ' ')
+	if idx1 == -1 {
 		return "", "", "", fmt.Errorf("malformed request line")
 	}
-	return parts[0], parts[1], parts[2], nil
+	method = line[:idx1]
+
+	remaining := line[idx1+1:]
+	idx2 := strings.IndexByte(remaining, ' ')
+	if idx2 == -1 {
+		return "", "", "", fmt.Errorf("malformed request line")
+	}
+	uri = remaining[:idx2]
+	version = remaining[idx2+1:]
+
+	if method == "" || uri == "" || version == "" {
+		return "", "", "", fmt.Errorf("malformed request line")
+	}
+	return method, uri, version, nil
 }
 
 // readHeaders reads all HTTP headers until blank line
-// Returns map with lowercase keys for case-insensitive lookup
-func readHeaders(reader *bufio.Reader) (map[string]string, error) {
-	headers := make(map[string]string, 8) // pre-allocate for typical case (8 headers)
+// Returns headers slice, auth header, and host header
+func readHeaders(reader *bufio.Reader) (headers []string, authHeader string, hostHeader string, err error) {
+	headers = make([]string, 0, 16)
 
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			return headers, err
+			return headers, "", "", err
 		}
 
-		line = trimCRLF(line)
+		cleanLine := trimCRLF(line)
 
-		// Check for end of headers (blank line)
-		if line == "" {
+		if cleanLine == "" {
 			break
 		}
 
-		// Parse "Key: Value" format using IndexByte for efficiency
-		colonIndex := strings.IndexByte(line, ':')
-		if colonIndex == -1 {
-			// Skip malformed headers
-			continue
+		// Check for Proxy-Authorization
+		if len(cleanLine) > 20 {
+			if strings.EqualFold(cleanLine[:20], "Proxy-Authorization:") {
+				authHeader = strings.TrimSpace(cleanLine[20:])
+				continue
+			}
 		}
 
-		key := strings.ToLower(strings.TrimSpace(line[:colonIndex]))
-		value := strings.TrimSpace(line[colonIndex+1:])
+		// Check for Host
+		if len(cleanLine) > 5 {
+			if strings.EqualFold(cleanLine[:5], "Host:") {
+				hostHeader = strings.TrimSpace(cleanLine[5:])
+			}
+		}
 
-		headers[key] = value
+		headers = append(headers, cleanLine)
 	}
 
-	return headers, nil
+	return headers, authHeader, hostHeader, nil
 }
 
 // handleHTTP handles HTTP proxy requests without debug logging
 func handleHTTP(client net.Conn) {
 	defer client.Close()
 
-	// Set idle timeout
 	client.SetDeadline(time.Now().Add(cfg.IdleTimeout))
 	defer client.SetDeadline(time.Time{})
 
 	reader := bufio.NewReader(client)
 
-	// Read request line
 	line, err := reader.ReadString('\n')
 	if err != nil {
 		return
 	}
 
-	// Parse request line
 	method, requestURI, version, err := parseRequestLine(line)
 	if err != nil {
 		io.WriteString(client, "HTTP/1.1 400 Bad Request\r\n\r\n")
 		return
 	}
 
-	// Read all headers
-	headers, err := readHeaders(reader)
+	headers, authHeader, hostHeader, err := readHeaders(reader)
 	if err != nil {
 		io.WriteString(client, "HTTP/1.1 400 Bad Request\r\n\r\n")
 		return
 	}
 
-	// Validate authentication if required using pre-computed flag
 	if cfg.AuthRequired {
-		authHeader := headers["proxy-authorization"]
 		if !validateAuth(authHeader) {
 			io.WriteString(client, "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"GGProxy\"\r\n\r\n")
 			if !cfg.isLogOff {
@@ -109,16 +120,25 @@ func handleHTTP(client net.Conn) {
 		}
 	}
 
-	// Route based on method (case-insensitive)
 	if method == "CONNECT" || method == "connect" {
 		handleHTTPConnect(client, reader, requestURI, version)
 		return
 	}
 
 	hostPort, newFirstLine, e := parseHostPortFromAbsoluteURI(method, requestURI, version)
-	if e != nil {
-		io.WriteString(client, "HTTP/1.1 400 Bad Request\r\n\r\n")
-		return
+	// If absolute URI parsing fails or returns empty host, use Host header
+	if e != nil || hostPort == "" || strings.HasPrefix(hostPort, ":") {
+		if hostHeader != "" {
+			if !strings.Contains(hostHeader, ":") {
+				hostPort = hostHeader + ":80"
+			} else {
+				hostPort = hostHeader
+			}
+			newFirstLine = "" 
+		} else {
+			io.WriteString(client, "HTTP/1.1 400 Bad Request\r\n\r\n")
+			return
+		}
 	}
 
 	remote, err := net.Dial("tcp", hostPort)
@@ -130,21 +150,16 @@ func handleHTTP(client net.Conn) {
 	remote.SetDeadline(time.Now().Add(cfg.IdleTimeout))
 	defer remote.SetDeadline(time.Time{})
 
-	// Send modified request line to remote
 	if newFirstLine != "" {
 		remote.Write([]byte(newFirstLine + "\r\n"))
 	} else {
 		remote.Write([]byte(line))
 	}
 
-	// Forward headers to remote (excluding Proxy-Authorization)
-	for key, value := range headers {
-		if key != "proxy-authorization" {
-			remote.Write([]byte(key + ": " + value + "\r\n"))
-		}
+	for _, h := range headers {
+		remote.Write([]byte(h + "\r\n"))
 	}
 
-	// Send blank line to complete HTTP request
 	remote.Write([]byte("\r\n"))
 
 	var wg sync.WaitGroup
